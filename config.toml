@@ -1,0 +1,20 @@
+# GHNoti config: notification groups, keyed by group name.
+# "authors" are GitHub account names, "repos" are full names like
+# "owner/repo" — either or both; both means a notification must match
+# both filters. Matching is case-insensitive.
+#
+# The special group "__all__" (every notification, unfiltered) is always
+# available; the groups below are yours and are cycled with CTRL+h / CTRL+l.
+
+[groups.CoreTeam]
+authors = ["torvalds", "gregkh"]
+
+[groups.Friends]
+authors = ["octocat", "gaearon"]
+
+[groups.Kernel]
+repos = ["torvalds/linux"]
+
+[groups.React]
+repos = ["facebook/react", "facebook/react-native"]
+authors = ["gaearon", "sebmarkbage"]
