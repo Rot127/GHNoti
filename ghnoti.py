@@ -14,7 +14,11 @@ Keys:
     m                 mark the selected thread as read (on GitHub)
     a                 toggle unread-only / include read (unread = bold)
     r                 re-fetch notifications
+    D                 mark selected thread as Done (removes it everywhere)
     q                 quit
+
+While data is loading a spinner runs in the title bar; j/k and group
+cycling still work, but a/r/m are ignored until the load finishes.
 """
 
 import argparse
@@ -23,6 +27,8 @@ import datetime as dt
 import os
 import shlex
 import subprocess
+import threading
+import time
 import webbrowser
 
 import auth
@@ -30,6 +36,7 @@ import config as cfg
 import github_api as gapi
 
 DATE_FMT = "%d %b %H:%M"
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # ~12 frames/sec
 TYPE_NAMES = {
     "PullRequest": "PR",
     "Issue": "ISSUE",
@@ -117,6 +124,7 @@ def put(scr, y: int, x: int, text: str, attr: int = 0) -> None:
 
 def popup(scr, lines: list[str]) -> None:
     """Blocking centered message; any key dismisses."""
+    scr.timeout(-1)  # block for the key even if the event loop is in poll mode
     scr.erase()
     maxy, maxx = scr.getmaxyx()
     for i, text in enumerate(lines[: max(1, maxy - 2)]):
@@ -172,10 +180,32 @@ def open_in_browser(url: str) -> str | None:
     return f"could not open browser for {url}"
 
 
+class Loader:
+    """Run a fetch on a worker thread so the TUI can keep drawing.
+
+    ``done`` flips to True once ``result`` (or ``error``) is available;
+    the event loop polls it and shows a spinner in the meantime.
+    """
+
+    def __init__(self, fn, *args):
+        self.result = None
+        self.error = None
+        self.done = False
+        self.thread = threading.Thread(target=self._run, args=(fn, args), daemon=True)
+        self.thread.start()
+
+    def _run(self, fn, args):
+        try:
+            self.result = fn(*args)
+        except Exception as exc:  # surfaced to the user by the event loop
+            self.error = exc
+        self.done = True
+
+
 # ─── drawing ────────────────────────────────────────────────────────────
 
 
-def draw(scr, state: State) -> None:
+def draw(scr, state: State, loading: Loader | None = None) -> None:
     scr.erase()
     maxy, maxx = scr.getmaxyx()
     rows = state.visible()
@@ -188,6 +218,9 @@ def draw(scr, state: State) -> None:
         f"{len(rows)} notifications{' (incl. read)' if state.show_all else ''} ",
         curses.A_REVERSE | curses.A_BOLD,
     )
+    if loading is not None:
+        frame = SPINNER[int(time.monotonic() * 12) % len(SPINNER)]
+        put(scr, 0, max(0, maxx - 4), f" {frame} ", curses.A_REVERSE | curses.A_BOLD)
     put(scr, 1, 0, f" {'DATE':<12}  {'AUTHOR':<12}  {'TYPE':<5}  {'REPOSITORY':<30}  TITLE", curses.A_BOLD)
 
     top, height = 2, max(0, maxy - 4)
@@ -203,7 +236,7 @@ def draw(scr, state: State) -> None:
 
     put(
         scr, maxy - 2, 0,
-        " ^h/^l group  j/k move  ENTER open  m mark read  a unread/all  r refresh  q quit ",
+        " ^h/^l group  j/k move  ENTER open  m read  D done  a unread/all  r refresh  q quit ",
         curses.A_REVERSE,
     )
     counts = [
@@ -218,14 +251,38 @@ def draw(scr, state: State) -> None:
 
 
 def run(scr, state: State, session) -> None:
-    def do_refresh():
-        state.notes = gapi.fetch_notifications(session, show_all=state.show_all)
-        gapi.enrich(session, state.notes)
+    def start_refresh() -> Loader:
+        """Fetch + enrich on a worker thread; result is the new notes list."""
+
+        def load():
+            notes = gapi.fetch_notifications(session, show_all=state.show_all)
+            gapi.enrich(session, notes)
+            return notes
+
+        return Loader(load)
 
     curses.curs_set(0)
+    loading: Loader | None = start_refresh()  # initial load, spinner visible
+    pending_toggle = False  # a load started by the 'a' key (rolls back on error)
     while True:
-        draw(scr, state)
+        scr.timeout(80 if loading else -1)  # poll while loading: animate the spinner
+        draw(scr, state, loading)
         ch = scr.getch()
+
+        if loading is not None and loading.done:  # adopt the finished load
+            done, loading = loading, None
+            scr.timeout(-1)
+            try:
+                if done.error is not None:
+                    raise done.error
+                state.notes = done.result
+            except Exception as exc:
+                if pending_toggle:  # 'a' flipped the flag already: undo it
+                    state.show_all = not state.show_all
+                popup(scr, [f"{'toggle' if pending_toggle else 'refresh'} failed: {exc}"])
+            finally:
+                pending_toggle = False
+
         try:
             if ch in (ord("q"), 27):
                 return
@@ -246,7 +303,7 @@ def run(scr, state: State, session) -> None:
                 state.step_group(-1)
             elif ch in (12, ord("l")):  # CTRL+l
                 state.step_group(1)
-            elif ch == ord("m"):
+            elif ch == ord("m") and loading is None:
                 n = state.selected()
                 if n:
                     try:
@@ -257,18 +314,20 @@ def run(scr, state: State, session) -> None:
                             state.notes.remove(n)
                     except Exception as exc:
                         popup(scr, [f"mark-as-read failed: {exc}"])
-            elif ch == ord("a"):  # toggle unread-only <-> include read
+            elif ch == ord("D") and loading is None:  # mark Done: gone in every mode
+                n = state.selected()
+                if n:
+                    try:
+                        gapi.mark_done(session, n["id"])
+                        state.notes.remove(n)
+                    except Exception as exc:
+                        popup(scr, [f"mark-as-done failed: {exc}"])
+            elif ch == ord("a") and loading is None:  # toggle unread-only <-> read
                 state.show_all = not state.show_all
-                try:
-                    do_refresh()
-                except Exception as exc:
-                    state.show_all = not state.show_all  # roll back on failure
-                    popup(scr, [f"toggle failed: {exc}"])
-            elif ch == ord("r"):
-                try:
-                    do_refresh()
-                except Exception as exc:
-                    popup(scr, [f"refresh failed: {exc}"])
+                pending_toggle = True
+                loading = start_refresh()
+            elif ch == ord("r") and loading is None:
+                loading = start_refresh()
         except Exception as exc:  # never let one bad key kill the whole TUI
             curses.endwin()
             popup(scr, [f"error: {exc}"])
@@ -283,9 +342,8 @@ def main() -> None:
     token = auth.load_token()  # ← the only secrets touchpoint; see auth.py
     session = gapi.make_session(token)
     groups = cfg.load(args.config)["groups"]
-    notes = gapi.fetch_notifications(session, show_all=args.all)
-    gapi.enrich(session, notes)
-    state = State(groups, notes, show_all=args.all)
+    # Notes load inside the TUI so the very first fetch shows the spinner too.
+    state = State(groups, [], show_all=args.all)
     curses.wrapper(run, state, session)
 
 

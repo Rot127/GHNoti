@@ -35,9 +35,16 @@ def make_session(token: str) -> requests.Session:
 def fetch_notifications(
     session: requests.Session, show_all: bool = False, max_pages: int = 10
 ) -> list[dict]:
-    """Fetch the authenticated user's notifications (GET /notifications)."""
+    """Fetch the authenticated user's notifications (GET /notifications).
+
+    ``is_done=false`` is always sent: notifications marked "Done" must
+    never appear, in either mode (the API does not filter them out when
+    the parameter is omitted). ``show_all`` adds previously *read*
+    (but not done) notifications.
+    """
     out: list[dict] = []
-    url, params = f"{API_URL}/notifications", {"per_page": 100, "all": str(show_all).lower()}
+    params = {"per_page": 100, "all": str(show_all).lower(), "is_done": "false"}
+    url = f"{API_URL}/notifications"
     for _ in range(max_pages):
         r = session.get(url, params=params, timeout=15)
         r.raise_for_status()
@@ -55,6 +62,19 @@ def mark_read(session: requests.Session, thread_id: str) -> None:
         f"{API_URL}/notifications/threads/{thread_id}", timeout=15
     )
     if r.status_code not in (202, 205):
+        r.raise_for_status()
+
+
+def mark_done(session: requests.Session, thread_id: str) -> None:
+    """Mark one notification thread as Done (DELETE /notifications/threads/{id}).
+
+    Done threads are excluded from every fetch (`is_done=false`), so this
+    permanently removes the thread from the TUI in both display modes.
+    """
+    r = session.delete(
+        f"{API_URL}/notifications/threads/{thread_id}", timeout=15
+    )
+    if r.status_code != 202:
         r.raise_for_status()
 
 

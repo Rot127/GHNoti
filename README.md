@@ -22,11 +22,16 @@ Needs `requests` (nothing else) and Python ≥ 3.11.
     ENTER              open notification in browser ($BROWSER, then xdg-open)
     m                  mark selected thread as read
     a                  toggle unread-only / include read (unread = bold)
+    D                  mark selected thread as Done (hidden everywhere)
     r                  re-fetch
     q                  quit
 
 A failed or hung browser launch can't freeze or kill the TUI: the opener
 is timeout-bounded and every keypress is wrapped in a catch-all.
+
+Fetches run on a worker thread with a spinner in the title bar, so the
+UI never freezes: navigation keeps working while data loads, and `a`/`r`/`m`
+are deferred until the load finishes.
 
 ## Config (`~/.config/ghnoti/config.toml`)
 
