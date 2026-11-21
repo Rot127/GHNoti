@@ -1,4 +1,4 @@
-"""Config loading for GHNoti: groups -> author lists, defined in TOML."""
+"""Config loading for GHNoti: groups and theme, defined in TOML."""
 
 import tomllib
 from pathlib import Path
@@ -13,13 +13,17 @@ class ConfigError(RuntimeError):
 
 
 def load(path: str | Path | None = None) -> dict:
-    """Return ``{"groups": [{"name", "authors", "repos"}]}``.
+    """Return ``{"groups": [...], "theme": {...}}``.
 
     Each group filters by ``authors`` (GitHub logins) and/or ``repos``
     (full names like ``owner/repo``); when both are given a notification
     must match BOTH. Values are stored lowercased; ``None`` means "no
     filter". A special group ``__all__`` (always first) shows every
     notification; it is generated, not configured.
+
+    ``theme`` maps the elements the TUI draws ("unread", "title", …) to
+    style strings; it is validated by theme.py, this only checks that the
+    values are strings.
     """
     path = Path(path).expanduser() if path else DEFAULT_CONFIG
     if not path.exists():
@@ -51,4 +55,8 @@ def load(path: str | Path | None = None) -> dict:
     groups.sort(key=lambda g: g["name"])
     # "__all__" is reserved: every notification, no filters.
     groups.insert(0, {"name": "__all__", "authors": None, "repos": None})
-    return {"groups": groups}
+
+    theme = raw.get("theme") or {}
+    if not isinstance(theme, dict):
+        raise ConfigError("[theme] must be a table of element -> style string")
+    return {"groups": groups, "theme": theme}

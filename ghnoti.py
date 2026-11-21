@@ -12,7 +12,7 @@ Keys:
     j / k (or ↑ / ↓)  move selection
     ENTER             open the selected notification in the browser
     m                 mark the selected thread as read (on GitHub)
-    a                 toggle unread-only / include read (unread = bold)
+    a                 toggle unread-only / include read (unread styled via [theme])
     r                 re-fetch notifications
     D                 mark selected thread as Done (removes it everywhere)
     q                 quit
@@ -34,6 +34,7 @@ import webbrowser
 import auth
 import config as cfg
 import github_api as gapi
+import theme as th
 
 DATE_FMT = "%d %b %H:%M"
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # ~12 frames/sec
@@ -78,13 +79,15 @@ def matches(n: dict, group: dict) -> bool:
 class State:
     """Everything the TUI renders: notes, current group, per-group cursors."""
 
-    def __init__(self, groups: list[dict], notes: list[dict], show_all: bool = False):
+    def __init__(self, groups: list[dict], notes: list[dict], show_all: bool = False,
+                 theme: "th.Theme | None" = None):
         self.groups = groups
         self.notes = notes
         self.show_all = show_all  # False = unread only; toggled with 'a'
         self.group = 0  # __all__ is always first
         self.cursor: dict[int, int] = {}  # group index -> selected row
         self.scroll = 0
+        self.theme = theme or th.Theme({})
 
     def visible(self) -> list[dict]:
         group = self.groups[self.group]
@@ -122,13 +125,13 @@ def put(scr, y: int, x: int, text: str, attr: int = 0) -> None:
             pass
 
 
-def popup(scr, lines: list[str]) -> None:
+def popup(scr, lines: list[str], attr: int = 0) -> None:
     """Blocking centered message; any key dismisses."""
     scr.timeout(-1)  # block for the key even if the event loop is in poll mode
     scr.erase()
     maxy, maxx = scr.getmaxyx()
     for i, text in enumerate(lines[: max(1, maxy - 2)]):
-        put(scr, maxy // 2 - len(lines) // 2 + i, 2, f" {text} ", curses.A_REVERSE)
+        put(scr, maxy // 2 - len(lines) // 2 + i, 2, f" {text} ", attr)
     scr.refresh()
     scr.getch()
 
@@ -206,6 +209,7 @@ class Loader:
 
 
 def draw(scr, state: State, loading: Loader | None = None) -> None:
+    t = state.theme
     scr.erase()
     maxy, maxx = scr.getmaxyx()
     rows = state.visible()
@@ -216,34 +220,35 @@ def draw(scr, state: State, loading: Loader | None = None) -> None:
         scr, 0, 0,
         f" GHNoti — {group['name']}  ({state.group + 1}/{len(state.groups)})  "
         f"{len(rows)} notifications{' (incl. read)' if state.show_all else ''} ",
-        curses.A_REVERSE | curses.A_BOLD,
+        t.attr("title"),
     )
     if loading is not None:
         frame = SPINNER[int(time.monotonic() * 12) % len(SPINNER)]
-        put(scr, 0, max(0, maxx - 4), f" {frame} ", curses.A_REVERSE | curses.A_BOLD)
-    put(scr, 1, 0, f" {'DATE':<12}  {'AUTHOR':<12}  {'TYPE':<5}  {'REPOSITORY':<30}  TITLE", curses.A_BOLD)
+        put(scr, 0, max(0, maxx - 4), f" {frame} ", t.attr("title"))
+    put(scr, 1, 0, f" {'DATE':<12}  {'AUTHOR':<12}  {'TYPE':<5}  {'REPOSITORY':<30}  TITLE",
+        t.attr("header"))
 
     top, height = 2, max(0, maxy - 4)
     cur = state.row()
     state.scroll = min(max(state.scroll, cur - height + 1), max(0, cur))
     for i, n in enumerate(rows[state.scroll : state.scroll + height]):
-        attr = curses.A_REVERSE if state.scroll + i == cur else 0
-        if n.get("unread"):
-            attr |= curses.A_BOLD
+        attr = t.attr("unread") if n.get("unread") else t.attr("read")
+        if state.scroll + i == cur:  # "selected" layers on the row's own style
+            attr |= t.attr("selected")
         put(scr, top + i, 0, " " + fmt_row(n), attr)
     if not rows:
-        put(scr, top, 2, "(no notifications in this group)", curses.A_DIM)
+        put(scr, top, 2, "(no notifications in this group)", t.attr("empty"))
 
     put(
         scr, maxy - 2, 0,
         " ^h/^l group  j/k move  ENTER open  m read  D done  a unread/all  r refresh  q quit ",
-        curses.A_REVERSE,
+        t.attr("footer"),
     )
     counts = [
         f" {g['name']}({sum(1 for n in state.notes if matches(n, g))})"
         for g in state.groups
     ]
-    put(scr, maxy - 1, 0, " groups:" + "".join(counts))
+    put(scr, maxy - 1, 0, " groups:" + "".join(counts), t.attr("text"))
     scr.refresh()
 
 
@@ -251,6 +256,8 @@ def draw(scr, state: State, loading: Loader | None = None) -> None:
 
 
 def run(scr, state: State, session) -> None:
+    t = state.theme
+
     def start_refresh() -> Loader:
         """Fetch + enrich on a worker thread; result is the new notes list."""
 
@@ -262,6 +269,7 @@ def run(scr, state: State, session) -> None:
         return Loader(load)
 
     curses.curs_set(0)
+    t.init(scr)
     loading: Loader | None = start_refresh()  # initial load, spinner visible
     pending_toggle = False  # a load started by the 'a' key (rolls back on error)
     while True:
@@ -279,7 +287,7 @@ def run(scr, state: State, session) -> None:
             except Exception as exc:
                 if pending_toggle:  # 'a' flipped the flag already: undo it
                     state.show_all = not state.show_all
-                popup(scr, [f"{'toggle' if pending_toggle else 'refresh'} failed: {exc}"])
+                popup(scr, [f"{'toggle' if pending_toggle else 'refresh'} failed: {exc}"], t.attr("popup"))
             finally:
                 pending_toggle = False
 
@@ -294,7 +302,7 @@ def run(scr, state: State, session) -> None:
                     err = open_in_browser(url)
                     scr.refresh()
                     if err:
-                        popup(scr, [err])
+                        popup(scr, [err], t.attr("popup"))
             elif ch in (ord("j"), curses.KEY_DOWN):
                 state.move(1)
             elif ch in (ord("k"), curses.KEY_UP):
@@ -313,7 +321,7 @@ def run(scr, state: State, session) -> None:
                         else:
                             state.notes.remove(n)
                     except Exception as exc:
-                        popup(scr, [f"mark-as-read failed: {exc}"])
+                        popup(scr, [f"mark-as-read failed: {exc}"], t.attr("popup"))
             elif ch == ord("D") and loading is None:  # mark Done: gone in every mode
                 n = state.selected()
                 if n:
@@ -321,7 +329,7 @@ def run(scr, state: State, session) -> None:
                         gapi.mark_done(session, n["id"])
                         state.notes.remove(n)
                     except Exception as exc:
-                        popup(scr, [f"mark-as-done failed: {exc}"])
+                        popup(scr, [f"mark-as-done failed: {exc}"], t.attr("popup"))
             elif ch == ord("a") and loading is None:  # toggle unread-only <-> read
                 state.show_all = not state.show_all
                 pending_toggle = True
@@ -330,7 +338,7 @@ def run(scr, state: State, session) -> None:
                 loading = start_refresh()
         except Exception as exc:  # never let one bad key kill the whole TUI
             curses.endwin()
-            popup(scr, [f"error: {exc}"])
+            popup(scr, [f"error: {exc}"], t.attr("popup"))
 
 
 def main() -> None:
@@ -341,9 +349,9 @@ def main() -> None:
 
     token = auth.load_token()  # ← the only secrets touchpoint; see auth.py
     session = gapi.make_session(token)
-    groups = cfg.load(args.config)["groups"]
+    conf = cfg.load(args.config)
     # Notes load inside the TUI so the very first fetch shows the spinner too.
-    state = State(groups, [], show_all=args.all)
+    state = State(conf["groups"], [], show_all=args.all, theme=th.Theme(conf["theme"]))
     curses.wrapper(run, state, session)
 
 

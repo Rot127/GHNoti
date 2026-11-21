@@ -21,7 +21,7 @@ Needs `requests` (nothing else) and Python ≥ 3.11.
     j / k, ↑ / ↓      move selection
     ENTER              open notification in browser ($BROWSER, then xdg-open)
     m                  mark selected thread as read
-    a                  toggle unread-only / include read (unread = bold)
+    a                  toggle unread-only / include read (unread styled via [theme])
     D                  mark selected thread as Done (hidden everywhere)
     r                  re-fetch
     q                  quit
@@ -45,8 +45,28 @@ are deferred until the load finishes.
     repos = ["facebook/react"]
     authors = ["gaearon"]                # gaearon's notifications in react
 
+    [theme]
+    read     = "bright-black"            # any mix of color, "on <color>", formats
+    unread   = "default bold"
+    title    = "bold reverse"             # top bar, header, footer, popup, …
+    selected = "bold reverse"
+
 Groups are cycled with CTRL+h/CTRL+l; the built-in `__all__` group
 shows every notification.
+
+### Theme
+
+`[theme]` is one flat table: element → style string. Elements:
+`background`, `text`, `read`, `unread`, `selected`, `title`, `header`,
+`footer`, `empty`, `popup`. A style is any mix of a color (`default`,
+`black`…`white`, `bright-*`, or hex `#rgb`/`#rrggbb` — hex is snapped to
+the nearest entry of the terminal's 256-color palette, since curses has
+no truecolor API), `on <color>` for the background, and formats: `bold`,
+`dim`, `reverse`, `underline`, `italic`, `blink`, `standout`. Unset
+elements fall back to defaults tuned for dark terminals — `read` is grey
+(`bright-black`) so it can't blur with `unread`. `background` (if set)
+must be a single color name; a terminal without (enough) color support
+keeps the layout, unrepresentable colors dropped.
 
 ## Security review
 
